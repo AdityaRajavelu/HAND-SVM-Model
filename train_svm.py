@@ -1,15 +1,14 @@
 """Train a session-aware linear SVM on 4-channel EMG data to classify gestures.
 
 Training is cumulative: it uses every recording session listed in
-emg_data.SESSIONS (day1 = original files, day2 = *_day2.txt files, ...).
+emg_data.SESSIONS (edit that dict in emg_data.py to change the training files).
 Feature engineering is in emg_data.EMGModel.
 
-Data files per session (one row per sample, all aligned):
-  emg_output*.txt             - 4 comma-separated EMG channel values
-  relabel_output*.txt         - gesture label (1 = rest, 2-6 = gestures); cleaned labels
-  gestureCounter_output*.txt  - repetition index, used to split train/test
-                                so that whole repetitions are held out (no leakage
-                                between temporally adjacent samples).
+Data file per session (one row per sample):
+  labeled_emg_output*.txt     - gesture label followed by 4 EMG channel values,
+                                comma-separated (label 1 = rest, 2-6 = gestures).
+                                Repetition numbers for the train/test split are
+                                derived automatically from the label transitions.
 """
 import joblib
 import numpy as np

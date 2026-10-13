@@ -183,19 +183,18 @@ def rest_gesture(p):
 # ---------------------------------------------------------------- report
 n_feat = F.shape[1]
 lines = [
-    "# Linear SVM – Results Report (cumulative: day 1 + day 2)",
+    f"# Linear SVM – Results Report (cumulative: {' + '.join(SESS)})",
     "",
     "## Summary",
     "",
     f"- On the combined held-out test set, balanced accuracy went from "
     f"**{fmt(eval_on(orig_p, 'all')['Balanced accuracy'])} → {fmt(test_m['Balanced accuracy'])}** and macro F1 "
     f"from **{fmt(eval_on(orig_p, 'all')['Macro F1'])} → {fmt(test_m['Macro F1'])}** compared with the original day-1 model.",
-    f"- Day-1 test set (same data as the first report): balanced accuracy "
-    f"{fmt(eval_on(orig_p, 'day1')['Balanced accuracy'])} → {fmt(eval_on(y_pred, 'day1')['Balanced accuracy'])}, "
-    f"so adding day 2 did not cost any day-1 performance.",
-    "- Simply retraining the old pipeline on both days (\"naive cumulative\") *hurts* day 1 because the "
-    "two days have different signal amplitudes per channel (e.g. electrode placement). The new "
-    "pipeline fixes this with per-day normalization and per-day feature blocks.",
+    *[f"- `{s}` test set: balanced accuracy {fmt(eval_on(orig_p, s)['Balanced accuracy'])} → "
+      f"{fmt(eval_on(y_pred, s)['Balanced accuracy'])} (original → new)." for s in SESS],
+    "- Simply retraining the old pipeline on all sessions (\"naive cumulative\") can *hurt* because "
+    "sessions have different signal amplitudes per channel (e.g. electrode placement). The new "
+    "pipeline handles this with per-session normalization and per-session feature blocks.",
     "",
     "## Setup",
     "",

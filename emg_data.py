@@ -5,16 +5,28 @@ To add a new recording session, append an entry to SESSIONS. Every script
 trained cumulatively on all sessions.
 """
 import numpy as np
+from pathlib import Path
 from scipy.ndimage import uniform_filter1d
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.svm import LinearSVC
 
-# name -> filename suffix ("" for the original files, "_day2" for *_day2.txt, ...)
+# =============================================================================
+# TRAINING DATA: one line per recording session.
+#   "name": "labeled EMG file",
+# The labeled EMG file has one sample per line: label,ch1,ch2,ch3,ch4
+# (make it from separate EMG + label files with combine_files.py).
+# Repetition numbers are derived automatically from the label transitions.
+# To change the training data, edit/replace a line. To add data, add a line.
+# To exclude a session, comment its line out with #.
+# Relative paths are resolved from this folder.
+# =============================================================================
 SESSIONS = {
-    "day1": "",
-    "day2": "_day2",
+    "day1": "labeled_emg_output.txt",
+    "day2": "labeled_emg_output_day2.txt",
 }
+
+DATA_DIR = Path(__file__).resolve().parent
 
 # Repetitions >= TEST_REP_START in every session are held out for testing.
 TEST_REP_START = 8
@@ -23,11 +35,39 @@ TEST_REP_START = 8
 WINDOWS = (25, 100, 400)
 
 
-def load_session(suffix):
-    X = np.loadtxt(f"emg_output{suffix}.txt", delimiter=",")
-    y = np.loadtxt(f"relabel_output{suffix}.txt").astype(int)
-    reps = np.loadtxt(f"gestureCounter_output{suffix}.txt").astype(int)
-    assert len(X) == len(y) == len(reps), f"length mismatch in session '{suffix}'"
+def derive_reps(y):
+    """Derive repetition counter per gesture directly from the label sequence.
+
+    Starts at 0 (initial rest). Each time a gesture segment starts (y != 1 and
+    different from the previous sample), increments that gesture's repetition
+    counter and holds the count through the gesture and following rest until
+    the next gesture begins.
+    """
+    reps = np.zeros(len(y), dtype=int)
+    diff = np.diff(np.r_[1, y])
+    starts = np.flatnonzero((y != 1) & (diff != 0))
+    counts = {}
+    for k, st in enumerate(starts):
+        lab = int(y[st])
+        counts[lab] = counts.get(lab, 0) + 1
+        end = starts[k + 1] if k + 1 < len(starts) else len(y)
+        reps[st:end] = counts[lab]
+    return reps
+
+
+def load_session(file_entry):
+    """Load one session from its labeled EMG file path.
+
+    Column 0 of the labeled EMG file is the gesture label; the remaining
+    columns are the EMG channels. Repetition indices are derived from column 0.
+    """
+    if isinstance(file_entry, (tuple, list)):
+        file_entry = file_entry[0]
+    data_path = DATA_DIR / file_entry
+    data = np.loadtxt(data_path, delimiter=",")
+    y = data[:, 0].astype(int)
+    X = data[:, 1:]
+    reps = derive_reps(y)
     return X, y, reps
 
 

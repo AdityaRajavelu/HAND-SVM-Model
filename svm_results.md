@@ -1,51 +1,64 @@
-# Linear SVM – Results Report (raw_input)
+# Linear SVM – Results Report (new_position)
 
 ## Summary
 
-- **Test accuracy:** **0.8691** (balanced accuracy **0.8691**, macro F1 **0.8658**, macro ROC AUC **0.9754**).
-- **Improvement over raw-feature linear SVM:** accuracy improved from **0.5585 → 0.8691** (+0.3106) and macro F1 from **0.5082 → 0.8658** (+0.3577) by adding causal time-domain window statistics (moving mean, std, waveform length, min/max/range) and polynomial channel interactions.
+- **Test accuracy:** **0.7266** (balanced accuracy **0.7266**, macro F1 **0.6883**, macro ROC AUC **0.9367**).
+- **Calibrated confidence:** temperature-scaled softmax (**T = 0.8840**, multiclass log-loss **0.9109**). Mean confidence on test predictions is **70.3%** (**74.8%** when correct vs. **58.3%** when incorrect).
+- **Improvement over raw-feature linear SVM:** accuracy improved from **0.6847 → 0.7266** (+0.0418) and macro F1 from **0.6604 → 0.6883** (+0.0279) by adding causal time-domain window statistics (moving mean, std, waveform length, min/max/range) and polynomial channel interactions.
 
 ## Setup
 
 | Item | Value |
 |---|---|
-| Data files | `RawInput.txt` (raw_input) |
+| Data files | `NewPosition.txt` (new_position) |
 | Channels | 2 EMG channels |
 | Classes | grip1, grip10, grip2, grip3, grip4, grip5, grip6, grip7, grip8, grip9, rest |
 | Train set | blocks/repetitions < 8, 23,100 samples |
 | Test set | blocks/repetitions ≥ 8, 9,900 samples (held out) |
 | Features | log1p → per-session standardization → causal window stats (mean, deviation, std, waveform length, max, min, range) over (10, 25, 50, 100, 200, 400) samples + degree-2 polynomial interactions (207 features) |
 | Classifier | StandardScaler + LinearSVC (C=0.1, class_weight=balanced, one-vs-rest) |
+| Confidence calibration | Out-of-fold temperature-scaled softmax (T = 0.8840) |
 | Hyperparameter search | GridSearchCV over C, GroupKFold(4) by (session, block/repetition), scoring = balanced accuracy |
-| Prediction time (test set, features precomputed) | 35.4 ms total, 3.57 µs/sample |
+| Prediction time (test set, features precomputed) | 17.1 ms total, 1.73 µs/sample |
 
 ## Overall metrics (train vs. test vs. raw baseline)
 
 | Metric | Raw LinearSVC (test) | Feature-engineered Train | Feature-engineered Test | Δ (Test vs. Raw) |
 |---|---|---|---|---|
-| Accuracy | 0.5585 | 0.9998 | 0.8691 | +0.3106 |
-| Balanced accuracy | 0.5585 | 0.9998 | 0.8691 | +0.3106 |
-| Macro F1 | 0.5082 | 0.9998 | 0.8658 | +0.3577 |
-| Weighted F1 | 0.5082 | 0.9998 | 0.8658 | +0.3577 |
-| Cohen's kappa | 0.5143 | 0.9998 | 0.8560 | +0.3417 |
-| Matthews corr. coef. (MCC) | 0.5238 | 0.9998 | 0.8569 | +0.3331 |
-| Macro ROC AUC (one-vs-rest) | – | – | 0.9754 | – |
+| Accuracy | 0.6847 | 0.9999 | 0.7266 | +0.0418 |
+| Balanced accuracy | 0.6847 | 0.9999 | 0.7266 | +0.0418 |
+| Macro F1 | 0.6604 | 0.9999 | 0.6883 | +0.0279 |
+| Weighted F1 | 0.6604 | 0.9999 | 0.6883 | +0.0279 |
+| Cohen's kappa | 0.6532 | 0.9999 | 0.6992 | +0.0460 |
+| Matthews corr. coef. (MCC) | 0.6589 | 0.9999 | 0.7077 | +0.0488 |
+| Macro ROC AUC (one-vs-rest) | – | – | 0.9367 | – |
+| Multiclass log-loss (calibrated) | – | – | 0.9109 | – |
 
 ## Per-class metrics (test set)
 
-| Class | Precision | Recall (sensitivity) | Specificity | F1 | ROC AUC | Support |
-|---|---|---|---|---|---|---|
-| grip1 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 0.9995 | 900 |
-| grip10 | 0.7416 | 0.9600 | 0.9666 | 0.8368 | 0.9573 | 900 |
-| grip2 | 1.0000 | 0.9533 | 1.0000 | 0.9761 | 0.9973 | 900 |
-| grip3 | 0.7484 | 0.7700 | 0.9741 | 0.7590 | 0.9595 | 900 |
-| grip4 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 0.9811 | 900 |
-| grip5 | 0.9667 | 1.0000 | 0.9966 | 0.9831 | 1.0000 | 900 |
-| grip6 | 0.6378 | 0.4989 | 0.9717 | 0.5599 | 0.9101 | 900 |
-| grip7 | 0.7725 | 0.7811 | 0.9770 | 0.7768 | 0.9701 | 900 |
-| grip8 | 1.0000 | 0.8978 | 1.0000 | 0.9461 | 1.0000 | 900 |
-| grip9 | 0.8724 | 0.6989 | 0.9898 | 0.7761 | 0.9750 | 900 |
-| rest | 0.8357 | 1.0000 | 0.9803 | 0.9105 | 0.9792 | 900 |
+| Class | Precision | Recall (sensitivity) | Specificity | F1 | ROC AUC | Mean Conf. | Support |
+|---|---|---|---|---|---|---|---|
+| grip1 | 0.7972 | 1.0000 | 0.9746 | 0.8871 | 0.9830 | 69.8% | 900 |
+| grip10 | 0.3204 | 0.1556 | 0.9670 | 0.2094 | 0.9179 | 52.2% | 900 |
+| grip2 | 1.0000 | 0.7456 | 1.0000 | 0.8542 | 0.9980 | 74.8% | 900 |
+| grip3 | 1.0000 | 0.0267 | 1.0000 | 0.0519 | 0.6908 | 63.5% | 900 |
+| grip4 | 0.9504 | 1.0000 | 0.9948 | 0.9746 | 1.0000 | 81.2% | 900 |
+| grip5 | 0.8911 | 1.0000 | 0.9878 | 0.9424 | 1.0000 | 92.0% | 900 |
+| grip6 | 0.4212 | 0.4456 | 0.9388 | 0.4330 | 0.7826 | 57.5% | 900 |
+| grip7 | 0.4502 | 0.9489 | 0.8841 | 0.6107 | 0.9646 | 71.6% | 900 |
+| grip8 | 0.8222 | 0.9200 | 0.9801 | 0.8684 | 1.0000 | 86.7% | 900 |
+| grip9 | 0.7289 | 0.7500 | 0.9721 | 0.7393 | 0.9662 | 59.3% | 900 |
+| rest | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 64.2% | 900 |
+
+## Confidence calibration (test set)
+
+| Confidence bucket | Samples | Mean confidence | Actual accuracy |
+|---|---|---|---|
+| < 50% | 1576 | 40.8% | 43.5% |
+| 50% – 70% | 3052 | 61.6% | 63.1% |
+| 70% – 85% | 2678 | 77.7% | 79.9% |
+| 85% – 95% | 2293 | 90.0% | 93.7% |
+| ≥ 95% | 301 | 96.0% | 97.0% |
 
 ## Confusion matrix (test set, counts)
 
@@ -54,15 +67,15 @@ Rows = true class, columns = predicted class.
 | True \ Pred | grip1 | grip10 | grip2 | grip3 | grip4 | grip5 | grip6 | grip7 | grip8 | grip9 | rest |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **grip1** | 900 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| **grip10** | 0 | 864 | 0 | 36 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| **grip2** | 0 | 0 | 858 | 0 | 0 | 31 | 0 | 0 | 0 | 0 | 11 |
-| **grip3** | 0 | 0 | 0 | 693 | 0 | 0 | 0 | 207 | 0 | 0 | 0 |
+| **grip10** | 0 | 140 | 0 | 0 | 0 | 0 | 551 | 0 | 0 | 209 | 0 |
+| **grip2** | 229 | 0 | 671 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| **grip3** | 0 | 0 | 0 | 24 | 1 | 0 | 0 | 875 | 0 | 0 | 0 |
 | **grip4** | 0 | 0 | 0 | 0 | 900 | 0 | 0 | 0 | 0 | 0 | 0 |
 | **grip5** | 0 | 0 | 0 | 0 | 0 | 900 | 0 | 0 | 0 | 0 | 0 |
-| **grip6** | 0 | 301 | 0 | 0 | 0 | 0 | 449 | 0 | 0 | 0 | 150 |
-| **grip7** | 0 | 0 | 0 | 197 | 0 | 0 | 0 | 703 | 0 | 0 | 0 |
-| **grip8** | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 808 | 92 | 0 |
-| **grip9** | 0 | 0 | 0 | 0 | 0 | 0 | 255 | 0 | 0 | 629 | 16 |
+| **grip6** | 0 | 0 | 0 | 0 | 0 | 110 | 401 | 168 | 179 | 42 | 0 |
+| **grip7** | 0 | 0 | 0 | 0 | 46 | 0 | 0 | 854 | 0 | 0 | 0 |
+| **grip8** | 0 | 72 | 0 | 0 | 0 | 0 | 0 | 0 | 828 | 0 | 0 |
+| **grip9** | 0 | 225 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 675 | 0 |
 | **rest** | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 900 |
 
 ## Confusion matrix (row-normalized = recall)
@@ -70,42 +83,42 @@ Rows = true class, columns = predicted class.
 | True \ Pred | grip1 | grip10 | grip2 | grip3 | grip4 | grip5 | grip6 | grip7 | grip8 | grip9 | rest |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **grip1** | 100.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
-| **grip10** | 0.0% | 96.0% | 0.0% | 4.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
-| **grip2** | 0.0% | 0.0% | 95.3% | 0.0% | 0.0% | 3.4% | 0.0% | 0.0% | 0.0% | 0.0% | 1.2% |
-| **grip3** | 0.0% | 0.0% | 0.0% | 77.0% | 0.0% | 0.0% | 0.0% | 23.0% | 0.0% | 0.0% | 0.0% |
+| **grip10** | 0.0% | 15.6% | 0.0% | 0.0% | 0.0% | 0.0% | 61.2% | 0.0% | 0.0% | 23.2% | 0.0% |
+| **grip2** | 25.4% | 0.0% | 74.6% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| **grip3** | 0.0% | 0.0% | 0.0% | 2.7% | 0.1% | 0.0% | 0.0% | 97.2% | 0.0% | 0.0% | 0.0% |
 | **grip4** | 0.0% | 0.0% | 0.0% | 0.0% | 100.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
 | **grip5** | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 100.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
-| **grip6** | 0.0% | 33.4% | 0.0% | 0.0% | 0.0% | 0.0% | 49.9% | 0.0% | 0.0% | 0.0% | 16.7% |
-| **grip7** | 0.0% | 0.0% | 0.0% | 21.9% | 0.0% | 0.0% | 0.0% | 78.1% | 0.0% | 0.0% | 0.0% |
-| **grip8** | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 89.8% | 10.2% | 0.0% |
-| **grip9** | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 28.3% | 0.0% | 0.0% | 69.9% | 1.8% |
+| **grip6** | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 12.2% | 44.6% | 18.7% | 19.9% | 4.7% | 0.0% |
+| **grip7** | 0.0% | 0.0% | 0.0% | 0.0% | 5.1% | 0.0% | 0.0% | 94.9% | 0.0% | 0.0% | 0.0% |
+| **grip8** | 0.0% | 8.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 92.0% | 0.0% | 0.0% |
+| **grip9** | 0.0% | 25.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 75.0% | 0.0% |
 | **rest** | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 100.0% |
 
 ## Most frequent misclassifications
 
 | True | Predicted as | Count | % of true class |
 |---|---|---|---|
-| grip6 | grip10 | 301 | 33.44% |
-| grip9 | grip6 | 255 | 28.33% |
-| grip3 | grip7 | 207 | 23.00% |
-| grip7 | grip3 | 197 | 21.89% |
-| grip6 | rest | 150 | 16.67% |
-| grip8 | grip9 | 92 | 10.22% |
-| grip10 | grip3 | 36 | 4.00% |
-| grip2 | grip5 | 31 | 3.44% |
+| grip3 | grip7 | 875 | 97.22% |
+| grip10 | grip6 | 551 | 61.22% |
+| grip2 | grip1 | 229 | 25.44% |
+| grip9 | grip10 | 225 | 25.00% |
+| grip10 | grip9 | 209 | 23.22% |
+| grip6 | grip8 | 179 | 19.89% |
+| grip6 | grip7 | 168 | 18.67% |
+| grip6 | grip5 | 110 | 12.22% |
 
 ## Cross-validation (training blocks, balanced accuracy)
 
 | C | Mean ± SD | Fold 1 | Fold 2 | Fold 3 | Fold 4 |
 |---|---|---|---|---|---|
-| 0.001 | 0.8663 ± 0.0418 | 0.8420 | 0.8961 | 0.8111 | 0.9161 |
-| 0.01 | 0.8855 ± 0.0716 | 0.8903 | 0.9209 | 0.7694 | 0.9612 |
-| 0.1 | 0.8933 ± 0.0826 | 0.8989 | 0.9265 | 0.7612 | 0.9867 |
+| 0.001 | 0.7794 ± 0.0876 | 0.8674 | 0.8082 | 0.6336 | 0.8085 |
+| 0.01 | 0.7874 ± 0.0781 | 0.8533 | 0.8374 | 0.6559 | 0.8030 |
+| 0.1 | 0.7879 ± 0.0870 | 0.8524 | 0.8406 | 0.6385 | 0.8200 |
 
 ## Test performance by held-out block/repetition
 
 | Session | Block/Rep | Samples | Accuracy | Balanced acc. | Macro F1 |
 |---|---|---|---|---|---|
-| raw_input | 8 | 3300 | 0.9176 | 0.9176 | 0.9165 |
-| raw_input | 9 | 3300 | 0.7891 | 0.7891 | 0.7684 |
-| raw_input | 10 | 3300 | 0.9006 | 0.9006 | 0.8985 |
+| new_position | 8 | 3300 | 0.8215 | 0.8215 | 0.7653 |
+| new_position | 9 | 3300 | 0.6670 | 0.6670 | 0.6320 |
+| new_position | 10 | 3300 | 0.6912 | 0.6912 | 0.6428 |

@@ -171,6 +171,49 @@ public:
         return best_cls;
     }
 
+    // Compute predicted class index [0 .. EMG_NUM_CLASSES-1] and calibrated softmax
+    // confidence in [0.0, 1.0]. Optionally outputs full probabilities and raw scores.
+    int predictWithConfidence(
+        float* confidence_out,
+        float probs_out[EMG_NUM_CLASSES] = nullptr,
+        float scores_out[EMG_NUM_CLASSES] = nullptr) const
+    {
+        float scores_local[EMG_NUM_CLASSES];
+        const int pred = predict(scores_local);
+        if (pred < 0) {
+            if (confidence_out != nullptr) {
+                *confidence_out = 0.0f;
+            }
+            return -1;
+        }
+        if (scores_out != nullptr) {
+            for (int c = 0; c < EMG_NUM_CLASSES; ++c) {
+                scores_out[c] = scores_local[c];
+            }
+        }
+
+        const float max_s = scores_local[pred];
+        const float inv_t = (EMG_SOFTMAX_TEMP > 1e-6f) ? (1.0f / EMG_SOFTMAX_TEMP) : 1.0f;
+        float probs_local[EMG_NUM_CLASSES];
+        float sum_exp = 0.0f;
+        for (int c = 0; c < EMG_NUM_CLASSES; ++c) {
+            const float e = expf((scores_local[c] - max_s) * inv_t);
+            probs_local[c] = e;
+            sum_exp += e;
+        }
+        const float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+        for (int c = 0; c < EMG_NUM_CLASSES; ++c) {
+            probs_local[c] *= inv_sum;
+            if (probs_out != nullptr) {
+                probs_out[c] = probs_local[c];
+            }
+        }
+        if (confidence_out != nullptr) {
+            *confidence_out = probs_local[pred];
+        }
+        return pred;
+    }
+
     static const char* className(int cls) {
         if (cls >= 0 && cls < EMG_NUM_CLASSES) {
             return EMG_CLASS_NAMES[cls];

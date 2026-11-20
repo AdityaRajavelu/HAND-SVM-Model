@@ -13,6 +13,7 @@ from sklearn.metrics import (
     cohen_kappa_score,
     confusion_matrix,
     f1_score,
+    log_loss,
     matthews_corrcoef,
     precision_recall_fscore_support,
     roc_auc_score,
@@ -69,6 +70,14 @@ y_pred = model.predict_features(F[test_mask])
 pred_time = time.perf_counter() - t0
 y_pred_train = model.predict_features(F[train_mask])
 scores = model.decision_function_features(F[test_mask])
+probs = model.predict_proba_features(F[test_mask])
+conf = probs.max(axis=1)
+correct = y_pred == y_test
+temp = float(getattr(model, "temperature_", 1.0))
+test_nll = log_loss(y_test, probs, labels=classes)
+mean_conf_all = float(conf.mean())
+mean_conf_ok = float(conf[correct].mean()) if correct.any() else 0.0
+mean_conf_err = float(conf[~correct].mean()) if (~correct).any() else 0.0
 
 # Baseline: raw log1p + StandardScaler + LinearSVC on the same training split
 raw_baseline = make_pipeline(
@@ -87,6 +96,7 @@ auc_per_class = roc_auc_score(y_test_bin, scores, average=None)
 auc_macro = roc_auc_score(y_test_bin, scores, average="macro")
 
 prec, rec, f1, sup = precision_recall_fscore_support(y_test, y_pred, labels=classes)
+mean_conf_per_class = [float(conf[y_test == c].mean()) for c in classes]
 cm = confusion_matrix(y_test, y_pred, labels=classes)
 specificity = []
 for i in range(len(classes)):
@@ -94,6 +104,22 @@ for i in range(len(classes)):
     fp = cm[:, i].sum() - cm[i, i]
     specificity.append(tn / (tn + fp))
 cm_norm = cm / cm.sum(axis=1, keepdims=True)
+
+# Confidence calibration buckets
+cal_buckets = [
+    ("< 50%", (conf < 0.50)),
+    ("50% – 70%", (conf >= 0.50) & (conf < 0.70)),
+    ("70% – 85%", (conf >= 0.70) & (conf < 0.85)),
+    ("85% – 95%", (conf >= 0.85) & (conf < 0.95)),
+    ("≥ 95%", (conf >= 0.95)),
+]
+cal_rows = []
+for label, mask in cal_buckets:
+    cnt = int(mask.sum())
+    if cnt == 0:
+        cal_rows.append([label, 0, "–", "–"])
+    else:
+        cal_rows.append([label, cnt, f"{conf[mask].mean():.1%}", f"{correct[mask].mean():.1%}"])
 
 # Cross-validation (from training).
 cv = model.cv_results_
@@ -137,6 +163,7 @@ lines = [
     "## Summary",
     "",
     f"- **Test accuracy:** **{fmt(test_m['Accuracy'])}** (balanced accuracy **{fmt(test_m['Balanced accuracy'])}**, macro F1 **{fmt(test_m['Macro F1'])}**, macro ROC AUC **{fmt(auc_macro)}**).",
+    f"- **Calibrated confidence:** temperature-scaled softmax (**T = {temp:.4f}**, multiclass log-loss **{test_nll:.4f}**). Mean confidence on test predictions is **{mean_conf_all:.1%}** (**{mean_conf_ok:.1%}** when correct vs. **{mean_conf_err:.1%}** when incorrect).",
     f"- **Improvement over raw-feature linear SVM:** accuracy improved from **{fmt(raw_m['Accuracy'])} → {fmt(test_m['Accuracy'])}** ({delta(test_m['Accuracy'], raw_m['Accuracy'])}) and macro F1 from **{fmt(raw_m['Macro F1'])} → {fmt(test_m['Macro F1'])}** ({delta(test_m['Macro F1'], raw_m['Macro F1'])}) by adding causal time-domain window statistics (moving mean, std, waveform length, min/max/range) and polynomial channel interactions.",
     "",
     "## Setup",
@@ -154,6 +181,7 @@ lines = [
                 f"log1p → per-session standardization → causal window stats (mean, deviation, std, waveform length, max, min, range) over {WINDOWS} samples + degree-2 polynomial interactions ({n_feat} features)",
             ],
             ["Classifier", f"StandardScaler + LinearSVC (C={model.C}, class_weight={model.class_weight}, one-vs-rest)"],
+            ["Confidence calibration", f"Out-of-fold temperature-scaled softmax (T = {temp:.4f})"],
             ["Hyperparameter search", "GridSearchCV over C, GroupKFold(4) by (session, block/repetition), scoring = balanced accuracy"],
             [
                 "Prediction time (test set, features precomputed)",
@@ -167,18 +195,34 @@ lines = [
     md_table(
         ["Metric", "Raw LinearSVC (test)", "Feature-engineered Train", "Feature-engineered Test", "Δ (Test vs. Raw)"],
         [[k, fmt(raw_m[k]), fmt(train_m[k]), fmt(test_m[k]), delta(test_m[k], raw_m[k])] for k in test_m]
-        + [["Macro ROC AUC (one-vs-rest)", "–", "–", fmt(auc_macro), "–"]],
+        + [
+            ["Macro ROC AUC (one-vs-rest)", "–", "–", fmt(auc_macro), "–"],
+            ["Multiclass log-loss (calibrated)", "–", "–", fmt(test_nll), "–"],
+        ],
     ),
     "",
     "## Per-class metrics (test set)",
     "",
     md_table(
-        ["Class", "Precision", "Recall (sensitivity)", "Specificity", "F1", "ROC AUC", "Support"],
+        ["Class", "Precision", "Recall (sensitivity)", "Specificity", "F1", "ROC AUC", "Mean Conf.", "Support"],
         [
-            [CLASS_NAMES[c], fmt(prec[i]), fmt(rec[i]), fmt(specificity[i]), fmt(f1[i]), fmt(auc_per_class[i]), sup[i]]
+            [
+                CLASS_NAMES[c],
+                fmt(prec[i]),
+                fmt(rec[i]),
+                fmt(specificity[i]),
+                fmt(f1[i]),
+                fmt(auc_per_class[i]),
+                f"{mean_conf_per_class[i]:.1%}",
+                sup[i],
+            ]
             for i, c in enumerate(classes)
         ],
     ),
+    "",
+    "## Confidence calibration (test set)",
+    "",
+    md_table(["Confidence bucket", "Samples", "Mean confidence", "Actual accuracy"], cal_rows),
     "",
     "## Confusion matrix (test set, counts)",
     "",

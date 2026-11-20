@@ -8,7 +8,7 @@
 // or wired to different analog pins.
 static const int EMG_PINS[EMG_NUM_CHANNELS] = { 34, 35 };
 
-// Match the sampling rate used when recording RawInput.txt so the 10..400 sample
+// Match the sampling rate used when recording NewPosition.txt so the 10..400 sample
 // sliding windows span the same durations.
 static constexpr uint32_t SAMPLE_RATE_HZ = 1000;
 static constexpr uint32_t PREDICT_EVERY_N_SAMPLES = 50;  // 20 Hz at 1000 Hz
@@ -26,15 +26,20 @@ static constexpr uint32_t SAMPLE_INTERVAL_US = 1000000UL / SAMPLE_RATE_HZ;
 static uint32_t last_sample_us = 0;
 
 // Hook your motor / servo / prosthetic hand controller here.
-void onGripPredicted(int cls, const char* name, float margin) {
+void onGripPredicted(int cls, const char* name, float confidence, int runner_up_cls, float runner_up_conf) {
     (void)cls;
+    // Example: only actuate a servo/motor when confidence is above a threshold:
+    // if (confidence < 0.70f) return;
+
     Serial.print("Grip: ");
     Serial.print(name);
-    Serial.print(" (class ");
-    Serial.print(cls);
-    Serial.print(", margin=");
-    Serial.print(margin, 3);
-    Serial.println(")");
+    Serial.print(" | Confidence: ");
+    Serial.print(confidence * 100.0f, 1);
+    Serial.print("% (2nd: ");
+    Serial.print(EmgSvmClassifier::className(runner_up_cls));
+    Serial.print(" ");
+    Serial.print(runner_up_conf * 100.0f, 1);
+    Serial.println("%)");
 }
 
 static void handleSample(const float raw[EMG_NUM_CHANNELS]) {
@@ -52,18 +57,17 @@ static void handleSample(const float raw[EMG_NUM_CHANNELS]) {
         return;
     }
 
-    float scores[EMG_NUM_CLASSES];
-    const int pred = classifier.predict(scores);
+    float confidence = 0.0f;
+    float probs[EMG_NUM_CLASSES];
+    const int pred = classifier.predictWithConfidence(&confidence, probs, nullptr);
 
-    // Compute margin = best_score - second_best_score
-    float second_best = -1e30f;
+    int second_cls = (pred == 0) ? 1 : 0;
     for (int c = 0; c < EMG_NUM_CLASSES; ++c) {
-        if (c != pred && scores[c] > second_best) {
-            second_best = scores[c];
+        if (c != pred && probs[c] > probs[second_cls]) {
+            second_cls = c;
         }
     }
-    const float margin = scores[pred] - second_best;
-    onGripPredicted(pred, EmgSvmClassifier::className(pred), margin);
+    onGripPredicted(pred, EmgSvmClassifier::className(pred), confidence, second_cls, probs[second_cls]);
 }
 
 void setup() {
@@ -72,7 +76,7 @@ void setup() {
 
 #if !USE_SERIAL_TEST_INPUT
     analogReadResolution(12);
-    analogSetAttenuation(ADC_11db);  // ~0 - 3.1 V range, matching RawInput.txt
+    analogSetAttenuation(ADC_11db);  // ~0 - 3.1 V range, matching NewPosition.txt
     for (int c = 0; c < EMG_NUM_CHANNELS; ++c) {
         pinMode(EMG_PINS[c], INPUT);
     }

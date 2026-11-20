@@ -6,6 +6,7 @@ To change or add recording sessions, edit SESSIONS below. Every script
 from pathlib import Path
 import numpy as np
 from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
+from scipy.optimize import minimize_scalar
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.svm import LinearSVC
@@ -19,7 +20,8 @@ from sklearn.svm import LinearSVC
 # To exclude a session, comment its line out with #.
 # =============================================================================
 SESSIONS = {
-    "raw_input": "RawInput.txt",
+    "new_position": "NewPosition.txt",
+    # "raw_input": "RawInput.txt",
     # "combined": "combined.txt",
     # "day1": "labeled_emg_output.txt",
     # "day2": "labeled_emg_output_day2.txt",
@@ -146,6 +148,7 @@ class EMGModel:
     def __init__(self, C=0.01, class_weight="balanced"):
         self.C = C
         self.class_weight = class_weight
+        self.temperature_ = 1.0
 
     # -- features -----------------------------------------------------------
     def _session_features(self, X, name):
@@ -222,3 +225,42 @@ class EMGModel:
 
     def decision_function(self, X, session):
         return self.decision_function_features(self.transform(X, session))
+
+    @staticmethod
+    def _softmax(scores, temperature):
+        s = np.asarray(scores, dtype=np.float64)
+        if s.ndim == 1:
+            s = np.column_stack([-s, s])
+        scaled = s / max(float(temperature), 1e-6)
+        scaled = scaled - scaled.max(axis=1, keepdims=True)
+        exp_s = np.exp(scaled)
+        return exp_s / exp_s.sum(axis=1, keepdims=True)
+
+    def calibrate_temperature(self, oof_scores, y_true):
+        """Fit softmax temperature T on out-of-fold decision scores to minimize NLL."""
+        cls_to_idx = {c: i for i, c in enumerate(self.classes_)}
+        y_idx = np.asarray([cls_to_idx[c] for c in y_true], dtype=int)
+        row_idx = np.arange(len(y_idx))
+
+        def nll(temp):
+            probs = self._softmax(oof_scores, temp)
+            return float(-np.mean(np.log(np.clip(probs[row_idx, y_idx], 1e-12, 1.0))))
+
+        res = minimize_scalar(nll, bounds=(0.05, 20.0), method="bounded")
+        self.temperature_ = float(res.x)
+        return self.temperature_
+
+    def predict_proba_features(self, F):
+        scores = self.decision_function_features(F)
+        return self._softmax(scores, getattr(self, "temperature_", 1.0))
+
+    def predict_proba(self, X, session):
+        return self.predict_proba_features(self.transform(X, session))
+
+    def predict_with_confidence_features(self, F):
+        probs = self.predict_proba_features(F)
+        idx = probs.argmax(axis=1)
+        return self.classes_[idx], probs[np.arange(len(idx)), idx]
+
+    def predict_with_confidence(self, X, session):
+        return self.predict_with_confidence_features(self.transform(X, session))

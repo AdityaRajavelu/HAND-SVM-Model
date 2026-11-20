@@ -111,6 +111,7 @@ def extract_model_params(model, session_name=None):
         "sd_norm": np.asarray(sd_norm, dtype=np.float64),
         "W_eff": W_eff,
         "b_eff": b_eff,
+        "temperature": float(getattr(model, "temperature_", 1.0)),
         "used_session": used_session,
     }
 
@@ -140,6 +141,7 @@ static constexpr int EMG_NUM_FEATURES = {params["n_features"]};
 static constexpr int EMG_NUM_WINDOWS = {params["n_windows"]};
 static constexpr int EMG_MAX_WINDOW = {params["max_window"]};
 static constexpr int EMG_POLY_INPUT_DIM = {params["poly_input_dim"]};
+static constexpr float EMG_SOFTMAX_TEMP = {fmt_f32(params["temperature"])};
 
 static const int EMG_WINDOWS[EMG_NUM_WINDOWS] = {{ {win_literals} }};
 static const uint8_t EMG_IS_POLY_WINDOW[EMG_NUM_WINDOWS] = {{ {poly_literals} }};
@@ -251,6 +253,7 @@ def verify_exported_header(header_path: Path, model) -> None:
     n_channels = int(re.search(r"EMG_NUM_CHANNELS\s*=\s*(\d+)", text).group(1))
     n_features = int(re.search(r"EMG_NUM_FEATURES\s*=\s*(\d+)", text).group(1))
     max_window = int(re.search(r"EMG_MAX_WINDOW\s*=\s*(\d+)", text).group(1))
+    temp = float(re.search(r"EMG_SOFTMAX_TEMP\s*=\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)f", text).group(1))
 
     windows = _parse_1d_ints(text, "EMG_WINDOWS")
     is_poly = _parse_1d_ints(text, "EMG_IS_POLY_WINDOW")
@@ -272,26 +275,37 @@ def verify_exported_header(header_path: Path, model) -> None:
 
     F_ref = model.transform(X, sess)
     scores_ref = model.decision_function_features(F_ref)
+    probs_ref = model.predict_proba_features(F_ref)
     pred_ref = model.predict_features(F_ref)
 
-    # 1. Verify exact feature & score match on 220 evenly spaced samples >= max_window
+    # 1. Verify exact feature, score, and probability match on 220 evenly spaced samples >= max_window
     sample_idxs = np.linspace(max_window, len(X) - 1, num=220, dtype=int)
     max_feat_diff = 0.0
     max_score_diff = 0.0
+    max_prob_diff = 0.0
     matches = 0
+    inv_t = np.float32(1.0 / max(temp, 1e-6))
     X32 = X.astype(np.float32)
     for t in sample_idxs:
         f32 = _cpp_ring_buffer_features(X32[t - max_window : t + 1], mu, sd, windows, is_poly)
         s32 = (weights @ f32 + bias).astype(np.float32)
+        exps = np.exp(((s32 - s32.max()) * inv_t).astype(np.float32)).astype(np.float32)
+        p32 = (exps / exps.sum()).astype(np.float32)
         max_feat_diff = max(max_feat_diff, float(np.abs(f32 - F_ref[t]).max()))
         max_score_diff = max(max_score_diff, float(np.abs(s32 - scores_ref[t]).max()))
+        max_prob_diff = max(max_prob_diff, float(np.abs(p32 - probs_ref[t]).max()))
         if parsed_classes[int(s32.argmax())] == str(pred_ref[t]):
             matches += 1
 
     match_rate = matches / len(sample_idxs)
-    print(f"Round-trip check (220 samples): max_feat_diff={max_feat_diff:.3e}, max_score_diff={max_score_diff:.3e}, pred_match={matches}/{len(sample_idxs)} ({match_rate:.1%})")
+    print(
+        f"Round-trip check (220 samples): max_feat_diff={max_feat_diff:.3e}, "
+        f"max_score_diff={max_score_diff:.3e}, max_prob_diff={max_prob_diff:.3e}, "
+        f"pred_match={matches}/{len(sample_idxs)} ({match_rate:.1%})"
+    )
     assert max_feat_diff < 1e-4, f"Feature diff too large: {max_feat_diff}"
     assert max_score_diff < 1e-3, f"Score diff too large: {max_score_diff}"
+    assert max_prob_diff < 1e-3, f"Prob diff too large: {max_prob_diff}"
     assert match_rate >= 0.995, f"Prediction match too low: {match_rate}"
 
     # 2. Verify held-out test accuracy with the exported float32 header

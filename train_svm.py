@@ -1,12 +1,12 @@
 """Train a session-aware linear SVM on EMG data to classify gestures/classes.
 
-Configured via emg_data.SESSIONS (currently set to "combined.txt").
-Feature engineering is in emg_data.EMGModel.
+Configured via emg_data.SESSIONS (currently set to "NewPosition.txt").
+Feature engineering and confidence calibration are in emg_data.EMGModel.
 """
 import joblib
 import numpy as np
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-from sklearn.model_selection import GridSearchCV, GroupKFold
+from sklearn.model_selection import GridSearchCV, GroupKFold, cross_val_predict
 
 from emg_data import SESSIONS, TEST_REP_START, EMGModel, load_all
 
@@ -47,12 +47,34 @@ model.cv_results_ = {
     if k.startswith(("param_", "mean_test", "std_test", "split"))
 }
 
-y_pred = model.predict_features(F[test_mask])
+oof_scores = cross_val_predict(
+    model.make_classifier(),
+    F[train_mask],
+    y[train_mask],
+    groups=group[train_mask],
+    cv=GroupKFold(n_splits=4),
+    method="decision_function",
+)
+temp = model.calibrate_temperature(oof_scores, y[train_mask])
+print(f"Calibrated softmax temperature: T = {temp:.4f}")
+
+y_pred, y_conf = model.predict_with_confidence_features(F[test_mask])
 y_test, s_test = y[test_mask], session[test_mask]
+correct = y_pred == y_test
 print(f"\nTest accuracy (all sessions): {accuracy_score(y_test, y_pred):.4f}")
+print(
+    f"Confidence (test): mean={y_conf.mean():.1%} | "
+    f"when correct={y_conf[correct].mean():.1%} | "
+    f"when wrong={y_conf[~correct].mean():.1%}"
+)
 for name in SESSIONS:
     m = s_test == name
-    print(f"  {name}: {accuracy_score(y_test[m], y_pred[m]):.4f}")
+    print(f"  {name}: {accuracy_score(y_test[m], y_pred[m]):.4f} (mean conf {y_conf[m].mean():.1%})")
+print("\nSample test predictions with confidence (one per class):")
+for cls in model.classes_:
+    idx = np.flatnonzero(y_test == cls)[0]
+    print(f"  true={cls:<7s} -> pred={y_pred[idx]:<7s} (confidence: {y_conf[idx]:.1%})")
+print()
 print(classification_report(y_test, y_pred, digits=4))
 print("Confusion matrix (rows = true, cols = predicted):")
 print(confusion_matrix(y_test, y_pred))

@@ -1,0 +1,333 @@
+"""Export a trained EMGModel (linear_svm.joblib) to a C++ header for ESP32 / Arduino IDE.
+
+Usage:
+    python export_esp32.py
+    python export_esp32.py --model linear_svm.joblib --out esp32_emg_svm/svm_model.h
+    python export_esp32.py --session day1   # for multi-session models
+"""
+import argparse
+import re
+from pathlib import Path
+
+import joblib
+import numpy as np
+
+from emg_data import POLY_WINDOWS, TEST_REP_START, WINDOWS, load_all
+
+
+def fmt_f32(value: float) -> str:
+    """Format a scalar as a valid C++ float32 literal (always includes '.' or 'e')."""
+    v = float(np.float32(value))
+    if v == 0.0:
+        return "0.0f"
+    s = f"{np.float32(v):.9g}"
+    if "." not in s and "e" not in s and "E" not in s:
+        s += ".0"
+    return s + "f"
+
+
+def fmt_c_array_1d(values, indent="    ", per_line=8) -> str:
+    items = [fmt_f32(v) for v in values]
+    lines = []
+    for i in range(0, len(items), per_line):
+        lines.append(indent + ", ".join(items[i : i + per_line]))
+    return ",\n".join(lines)
+
+
+def extract_model_params(model, session_name=None):
+    """Extract normalization stats and StandardScaler-folded LinearSVC weights."""
+    assert all(WINDOWS[i] < WINDOWS[i + 1] for i in range(len(WINDOWS) - 1)), (
+        f"WINDOWS must be strictly ascending, got {WINDOWS}"
+    )
+
+    classes = [str(c) for c in model.classes_]
+    svc = model.pipeline_.named_steps["linearsvc"]
+    sc = model.pipeline_.named_steps["standardscaler"]
+
+    W_raw = svc.coef_.astype(np.float64)
+    b_raw = svc.intercept_.astype(np.float64)
+    if len(classes) == 2 and W_raw.shape[0] == 1:
+        W_raw = np.vstack([-W_raw, W_raw])
+        b_raw = np.array([-b_raw[0], b_raw[0]], dtype=np.float64)
+
+    # Fold StandardScaler (z = (f - mean) / scale) directly into W and b.
+    sc_scale = sc.scale_.astype(np.float64)
+    sc_mean = sc.mean_.astype(np.float64)
+    W_scaled = W_raw / sc_scale
+    b_eff = b_raw - W_scaled @ sc_mean
+
+    sessions = list(model.sessions_)
+    if len(sessions) == 1:
+        chosen = sessions[0]
+        if session_name is not None and session_name not in (chosen, "shared"):
+            raise ValueError(f"Session '{session_name}' not in model sessions {sessions}")
+        mu, sd_norm = model.norm_stats_[chosen]
+        W_eff = W_scaled
+        used_session = chosen
+    else:
+        n_blocks = 1 + len(sessions)
+        assert W_scaled.shape[1] % n_blocks == 0, "Unexpected feature dimension for multi-session model"
+        base_dim = W_scaled.shape[1] // n_blocks
+        if session_name is None or session_name == "shared":
+            W_eff = W_scaled[:, :base_dim]
+            mu = np.mean([model.norm_stats_[s][0] for s in sessions], axis=0)
+            sd_norm = np.mean([model.norm_stats_[s][1] for s in sessions], axis=0)
+            used_session = "shared"
+        else:
+            if session_name not in sessions:
+                raise ValueError(f"Session '{session_name}' not in model sessions {sessions}")
+            idx = sessions.index(session_name)
+            W_eff = W_scaled[:, :base_dim] + W_scaled[:, (idx + 1) * base_dim : (idx + 2) * base_dim]
+            mu, sd_norm = model.norm_stats_[session_name]
+            used_session = session_name
+
+    n_channels = len(mu)
+    n_classes = len(classes)
+    n_windows = len(WINDOWS)
+    max_window = max(WINDOWS)
+    is_poly = [1 if k in POLY_WINDOWS else 0 for k in WINDOWS]
+    poly_input_dim = n_channels * (1 + 2 * sum(is_poly))
+    expected_features = (
+        2 * n_channels
+        + n_windows * 7 * n_channels
+        + poly_input_dim
+        + (poly_input_dim * (poly_input_dim + 1)) // 2
+    )
+    assert expected_features == W_eff.shape[1], (
+        f"Expected {expected_features} features, got {W_eff.shape[1]}"
+    )
+
+    return {
+        "classes": classes,
+        "n_classes": n_classes,
+        "n_channels": n_channels,
+        "n_features": expected_features,
+        "n_windows": n_windows,
+        "max_window": max_window,
+        "windows": list(WINDOWS),
+        "is_poly": is_poly,
+        "poly_input_dim": poly_input_dim,
+        "mu": np.asarray(mu, dtype=np.float64),
+        "sd_norm": np.asarray(sd_norm, dtype=np.float64),
+        "W_eff": W_eff,
+        "b_eff": b_eff,
+        "used_session": used_session,
+    }
+
+
+def write_header(out_path: Path, params: dict) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    classes = params["classes"]
+    class_literals = ", ".join(f'"{c}"' for c in classes)
+    win_literals = ", ".join(str(k) for k in params["windows"])
+    poly_literals = ", ".join(str(p) for p in params["is_poly"])
+
+    weight_rows = []
+    for cls_idx, cls_name in enumerate(classes):
+        body = fmt_c_array_1d(params["W_eff"][cls_idx], indent="        ", per_line=8)
+        weight_rows.append(f"    {{ // class {cls_idx}: {cls_name}\n{body}\n    }}")
+    weights_block = ",\n".join(weight_rows)
+
+    header = f"""#pragma once
+// Auto-generated by export_esp32.py (session: {params["used_session"]})
+// Do not edit manually; re-run `python export_esp32.py` after retraining.
+
+#include <stdint.h>
+
+static constexpr int EMG_NUM_CLASSES = {params["n_classes"]};
+static constexpr int EMG_NUM_CHANNELS = {params["n_channels"]};
+static constexpr int EMG_NUM_FEATURES = {params["n_features"]};
+static constexpr int EMG_NUM_WINDOWS = {params["n_windows"]};
+static constexpr int EMG_MAX_WINDOW = {params["max_window"]};
+static constexpr int EMG_POLY_INPUT_DIM = {params["poly_input_dim"]};
+
+static const int EMG_WINDOWS[EMG_NUM_WINDOWS] = {{ {win_literals} }};
+static const uint8_t EMG_IS_POLY_WINDOW[EMG_NUM_WINDOWS] = {{ {poly_literals} }};
+
+static const char* const EMG_CLASS_NAMES[EMG_NUM_CLASSES] = {{
+    {class_literals}
+}};
+
+// Per-channel log1p normalization statistics (mean and std)
+static const float EMG_NORM_MU[EMG_NUM_CHANNELS] = {{
+{fmt_c_array_1d(params["mu"], indent="    ", per_line=8)}
+}};
+
+static const float EMG_NORM_SD[EMG_NUM_CHANNELS] = {{
+{fmt_c_array_1d(params["sd_norm"], indent="    ", per_line=8)}
+}};
+
+// StandardScaler folded into LinearSVC intercept and weights
+static const float EMG_SVM_BIAS[EMG_NUM_CLASSES] = {{
+{fmt_c_array_1d(params["b_eff"], indent="    ", per_line=8)}
+}};
+
+static const float EMG_SVM_WEIGHTS[EMG_NUM_CLASSES][EMG_NUM_FEATURES] = {{
+{weights_block}
+}};
+"""
+    out_path.write_text(header, encoding="utf-8", newline="\n")
+
+
+def _parse_1d_floats(text: str, name: str) -> np.ndarray:
+    m = re.search(rf"{re.escape(name)}\[[^\]]+\]\s*=\s*\{{([^}}]+)\}}", text)
+    assert m, f"Could not find {name} in generated header"
+    vals = [float(tok.rstrip("f")) for tok in re.findall(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?f", m.group(1))]
+    return np.asarray(vals, dtype=np.float32)
+
+
+def _parse_1d_ints(text: str, name: str) -> list[int]:
+    m = re.search(rf"{re.escape(name)}\[[^\]]+\]\s*=\s*\{{([^}}]+)\}}", text)
+    assert m, f"Could not find {name} in generated header"
+    return [int(x) for x in re.findall(r"\d+", m.group(1))]
+
+
+def _parse_2d_floats(text: str, name: str, rows: int, cols: int) -> np.ndarray:
+    m = re.search(rf"{re.escape(name)}\[[^\]]+\]\[[^\]]+\]\s*=\s*\{{(.*)\n\}};", text, re.S)
+    assert m, f"Could not find {name} in generated header"
+    vals = [float(tok.rstrip("f")) for tok in re.findall(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?f", m.group(1))]
+    arr = np.asarray(vals, dtype=np.float32)
+    assert arr.size == rows * cols, f"{name} size mismatch: {arr.size} != {rows * cols}"
+    return arr.reshape(rows, cols)
+
+
+def _cpp_ring_buffer_features(X_window: np.ndarray, mu: np.ndarray, sd: np.ndarray, windows: list[int], is_poly: list[int]) -> np.ndarray:
+    """Exact Python float32 simulation of EmgSvmClassifier's single-pass feature extraction."""
+    # X_window has shape (max_window + 1, n_channels) ending at current sample t
+    L = np.log1p(np.maximum(X_window, np.float32(0.0))).astype(np.float32)
+    N_all = ((L - mu) / sd).astype(np.float32)
+    dN_all = np.abs(N_all[1:] - N_all[:-1]).astype(np.float32)
+    N_buf = N_all[1:]  # length = max_window, last element is current sample
+
+    n_cur = N_buf[-1]
+    dn_cur = dN_all[-1]
+    n_ch = X_window.shape[1]
+
+    feats = [n_cur, dn_cur]
+    poly_in = [n_cur]
+
+    sum_d = np.zeros(n_ch, dtype=np.float32)
+    sum_d2 = np.zeros(n_ch, dtype=np.float32)
+    sum_dn = np.zeros(n_ch, dtype=np.float32)
+    cur_max = N_buf[-1].copy()
+    cur_min = N_buf[-1].copy()
+
+    max_w = max(windows)
+    w_idx = 0
+    for age in range(max_w):
+        pos = max_w - 1 - age
+        v = N_buf[pos]
+        d = np.float32(v - n_cur)
+        sum_d = np.float32(sum_d + d)
+        sum_d2 = np.float32(sum_d2 + d * d)
+        sum_dn = np.float32(sum_dn + dN_all[pos])
+        cur_max = np.maximum(cur_max, v)
+        cur_min = np.minimum(cur_min, v)
+
+        if w_idx < len(windows) and (age + 1) == windows[w_idx]:
+            inv_k = np.float32(1.0 / float(windows[w_idx]))
+            mean_d = np.float32(sum_d * inv_k)
+            mean_n = np.float32(n_cur + mean_d)
+            var_n = np.float32(sum_d2 * inv_k - mean_d * mean_d)
+            std_n = np.sqrt(np.maximum(var_n, np.float32(0.0))).astype(np.float32)
+            wl = np.float32(sum_dn * inv_k)
+
+            feats.extend([mean_n, np.float32(n_cur - mean_n), std_n, wl, cur_max, cur_min, np.float32(cur_max - cur_min)])
+            if is_poly[w_idx]:
+                poly_in.extend([mean_n, std_n])
+            w_idx += 1
+
+    poly_vec = np.concatenate(poly_in).astype(np.float32)
+    feats.append(poly_vec)
+    p_len = len(poly_vec)
+    quad = np.array([np.float32(poly_vec[i] * poly_vec[j]) for i in range(p_len) for j in range(i, p_len)], dtype=np.float32)
+    feats.append(quad)
+    return np.concatenate(feats).astype(np.float32)
+
+
+def verify_exported_header(header_path: Path, model) -> None:
+    text = header_path.read_text(encoding="utf-8")
+    n_classes = int(re.search(r"EMG_NUM_CLASSES\s*=\s*(\d+)", text).group(1))
+    n_channels = int(re.search(r"EMG_NUM_CHANNELS\s*=\s*(\d+)", text).group(1))
+    n_features = int(re.search(r"EMG_NUM_FEATURES\s*=\s*(\d+)", text).group(1))
+    max_window = int(re.search(r"EMG_MAX_WINDOW\s*=\s*(\d+)", text).group(1))
+
+    windows = _parse_1d_ints(text, "EMG_WINDOWS")
+    is_poly = _parse_1d_ints(text, "EMG_IS_POLY_WINDOW")
+    mu = _parse_1d_floats(text, "EMG_NORM_MU")
+    sd = _parse_1d_floats(text, "EMG_NORM_SD")
+    bias = _parse_1d_floats(text, "EMG_SVM_BIAS")
+    weights = _parse_2d_floats(text, "EMG_SVM_WEIGHTS", n_classes, n_features)
+    class_names_m = re.search(r"EMG_CLASS_NAMES\[[^\]]+\]\s*=\s*\{([^}]+)\}", text)
+    parsed_classes = re.findall(r'"([^"]+)"', class_names_m.group(1))
+
+    assert len(parsed_classes) == n_classes
+    assert len(mu) == n_channels and len(sd) == n_channels and len(bias) == n_classes
+    assert max(windows) == max_window
+
+    X, y, reps, sess, _ = load_all()
+    if X.shape[1] != n_channels or len(model.sessions_) != 1 or model.sessions_[0] not in sess:
+        print("Header parsed & array shapes verified (dataset does not match single exported session; skipping sample comparison).")
+        return
+
+    F_ref = model.transform(X, sess)
+    scores_ref = model.decision_function_features(F_ref)
+    pred_ref = model.predict_features(F_ref)
+
+    # 1. Verify exact feature & score match on 220 evenly spaced samples >= max_window
+    sample_idxs = np.linspace(max_window, len(X) - 1, num=220, dtype=int)
+    max_feat_diff = 0.0
+    max_score_diff = 0.0
+    matches = 0
+    X32 = X.astype(np.float32)
+    for t in sample_idxs:
+        f32 = _cpp_ring_buffer_features(X32[t - max_window : t + 1], mu, sd, windows, is_poly)
+        s32 = (weights @ f32 + bias).astype(np.float32)
+        max_feat_diff = max(max_feat_diff, float(np.abs(f32 - F_ref[t]).max()))
+        max_score_diff = max(max_score_diff, float(np.abs(s32 - scores_ref[t]).max()))
+        if parsed_classes[int(s32.argmax())] == str(pred_ref[t]):
+            matches += 1
+
+    match_rate = matches / len(sample_idxs)
+    print(f"Round-trip check (220 samples): max_feat_diff={max_feat_diff:.3e}, max_score_diff={max_score_diff:.3e}, pred_match={matches}/{len(sample_idxs)} ({match_rate:.1%})")
+    assert max_feat_diff < 1e-4, f"Feature diff too large: {max_feat_diff}"
+    assert max_score_diff < 1e-3, f"Score diff too large: {max_score_diff}"
+    assert match_rate >= 0.995, f"Prediction match too low: {match_rate}"
+
+    # 2. Verify held-out test accuracy with the exported float32 header
+    test_idxs = np.flatnonzero((reps >= TEST_REP_START) & (np.arange(len(X)) >= max_window))
+    sk_test_acc = float((pred_ref[test_idxs] == y[test_idxs]).mean())
+    F_test32 = F_ref[test_idxs].astype(np.float32)
+    cpp_scores_test = F_test32 @ weights.T + bias
+    cpp_preds_test = np.array([parsed_classes[i] for i in cpp_scores_test.argmax(axis=1)])
+    cpp_test_acc = float((cpp_preds_test == y[test_idxs].astype(str)).mean())
+    acc_diff = abs(cpp_test_acc - sk_test_acc)
+    print(f"Held-out test accuracy: scikit-learn={sk_test_acc:.4f}, exported float32={cpp_test_acc:.4f} (diff={acc_diff:.4e})")
+    assert acc_diff <= 0.0005, f"Test accuracy mismatch: {acc_diff}"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", default="linear_svm.joblib", help="Path to trained joblib model")
+    parser.add_argument("--out", default="esp32_emg_svm/svm_model.h", help="Output C++ header path")
+    parser.add_argument("--session", default=None, help="Session name (for multi-session models; default: auto or 'shared')")
+    parser.add_argument("--no-verify", action="store_true", help="Skip round-trip verification")
+    args = parser.parse_args()
+
+    here = Path(__file__).resolve().parent
+    model_path = Path(args.model) if Path(args.model).is_absolute() else here / args.model
+    out_path = Path(args.out) if Path(args.out).is_absolute() else here / args.out
+
+    model = joblib.load(model_path)
+    params = extract_model_params(model, session_name=args.session)
+    write_header(out_path, params)
+
+    weight_bytes = (params["W_eff"].size + params["b_eff"].size + params["mu"].size * 2) * 4
+    print(f"Exported {out_path} ({params['n_classes']} classes, {params['n_channels']} channels, {params['n_features']} features, ~{weight_bytes / 1024:.1f} KB flash)")
+
+    if not args.no_verify:
+        verify_exported_header(out_path, model)
+
+
+if __name__ == "__main__":
+    main()

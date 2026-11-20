@@ -1,14 +1,7 @@
-"""Train a session-aware linear SVM on 4-channel EMG data to classify gestures.
+"""Train a session-aware linear SVM on EMG data to classify gestures/classes.
 
-Training is cumulative: it uses every recording session listed in
-emg_data.SESSIONS (edit that dict in emg_data.py to change the training files).
+Configured via emg_data.SESSIONS (currently set to "combined.txt").
 Feature engineering is in emg_data.EMGModel.
-
-Data file per session (one row per sample):
-  labeled_emg_output*.txt     - gesture label followed by 4 EMG channel values,
-                                comma-separated (label 1 = rest, 2-6 = gestures).
-                                Repetition numbers for the train/test split are
-                                derived automatically from the label transitions.
 """
 import joblib
 import numpy as np
@@ -19,10 +12,10 @@ from emg_data import SESSIONS, TEST_REP_START, EMGModel, load_all
 
 X, y, reps, session, group = load_all()
 
-# Hold out the last repetitions (>= TEST_REP_START) of every session as the test set.
+# Hold out the last repetitions/blocks (>= TEST_REP_START) of every session as the test set.
 test_mask = reps >= TEST_REP_START
 train_mask = ~test_mask
-print(f"sessions: {list(SESSIONS)}")
+print(f"sessions: {list(SESSIONS)} | channels: {X.shape[1]} | classes: {list(np.unique(y))}")
 print(f"train: {train_mask.sum()} samples, test: {test_mask.sum()} samples")
 
 model = EMGModel(class_weight="balanced")
@@ -33,13 +26,13 @@ model.fit_normalization(X[train_mask], session[train_mask])
 F = model.transform(X, session)
 print(f"feature dimension: {F.shape[1]}")
 
-# Tune C with grouped CV: groups are (session, repetition) pairs.
+# Tune C with grouped CV: groups are (session, repetition/block) pairs.
 search = GridSearchCV(
     model.make_classifier(),
-    {"linearsvc__C": [0.1, 1, 10]},
+    {"linearsvc__C": [0.001, 0.01, 0.1]},
     cv=GroupKFold(n_splits=4),
     scoring="balanced_accuracy",
-    n_jobs=-1,
+    n_jobs=1,
     return_train_score=False,
 )
 search.fit(F[train_mask], y[train_mask], groups=group[train_mask])
